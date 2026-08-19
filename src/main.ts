@@ -1,7 +1,6 @@
 import { decodeBase64, encodeBase64 } from "@std/encoding/base64";
 import { Buffer } from "node:buffer";
 import { dirname } from "node:path";
-import { HttpsProxyAgent } from "https-proxy-agent";
 import WebSocket, { type RawData } from "ws";
 
 // ---------------------------------------------------------------------------
@@ -35,7 +34,7 @@ const LOCAL_REQUEST_TIMEOUT_MS = 70_000;
 const HEALTHY_SESSION_MS = 60_000;
 const TUNNEL_PROTOCOL = "twofiftytwo-mcp-tunnel.v1";
 /** Reported to the gateway on connect and surfaced in the Data Sources UI. */
-const AGENT_VERSION = "1.2.0";
+const AGENT_VERSION = "1.2.1";
 /**
  * Gateway close codes the agent treats specially. (4003 = token expired is
  * deliberately NOT special-cased: the ordinary reconnect path fetches a fresh
@@ -290,29 +289,180 @@ function createControlHttpClient(
 }
 
 /**
- * Proxy agent for the WebSocket path. The credential-bearing URL must never
- * reach the https-proxy-agent dependency: its DEBUG logging prints the full
- * href (including userinfo) to container logs, so a customer troubleshooting
- * with DEBUG=* would write their proxy credentials into whatever collects
- * stdout. Strip the userinfo and send the same Basic credentials explicitly
- * on the CONNECT instead — mirroring what createControlHttpClient already
- * does for the Deno-native control-plane client.
+ * Proxied WebSocket path. The `ws` client cannot ride an outbound proxy under
+ * this runtime: node-compat cannot hand a pre-established socket to node:http
+ * for the upgrade — https-proxy-agent times out the opening handshake, and a
+ * manual `createConnection` dies with "Bad resource ID" (verified against a
+ * known-good CONNECT proxy that carries the identical ws version fine under
+ * Node). So the proxy leg is built from the Deno-native primitives the
+ * control plane already trusts: dial the proxy, speak CONNECT, Deno.startTls
+ * to the gateway — then let `ws` dial a one-shot loopback listener bridged
+ * onto that TLS stream. `ws` keeps owning every protocol concern (framing,
+ * masking, ping/pong, close); the bridge only moves bytes.
+ *
+ * The credential-bearing proxy URL is never logged and never handed to a
+ * dependency: userinfo is stripped and sent as an explicit Proxy-Authorization
+ * header on the CONNECT — mirroring createControlHttpClient.
  */
-function createWsProxyAgent(
+interface ProxyBridge {
+  /** ws:// URL on 127.0.0.1 for the `ws` client to dial. */
+  url: string;
+  /** Host header carrying the real gateway authority. */
+  hostHeader: string;
+  /** Idempotent; closes the listener and both legs of the bridge. */
+  cleanup(): void;
+}
+
+const PROXY_TUNNEL_TIMEOUT_MS = 15_000;
+const PROXY_CONNECT_HEADER_MAX_BYTES = 16 * 1024;
+
+function startProxyBridge(
   rawProxyUrl: string,
-): HttpsProxyAgent<string> {
-  const url = new URL(rawProxyUrl);
-  const username = decodeURIComponent(url.username);
-  const password = decodeURIComponent(url.password);
-  url.username = "";
-  url.password = "";
-  if (username || password) {
-    const basic = Buffer.from(`${username}:${password}`).toString("base64");
-    return new HttpsProxyAgent(url.toString(), {
-      headers: { "Proxy-Authorization": `Basic ${basic}` },
-    });
+  gatewayUrl: string,
+): ProxyBridge {
+  const gateway = new URL(gatewayUrl);
+  const secure = gateway.protocol === "wss:";
+  const gatewayPort = Number(gateway.port) || (secure ? 443 : 80);
+  const defaultPort = secure ? 443 : 80;
+  const hostHeader = gatewayPort === defaultPort
+    ? gateway.hostname
+    : `${gateway.hostname}:${gatewayPort}`;
+
+  const proxy = new URL(rawProxyUrl);
+  const proxyPort = Number(proxy.port) ||
+    (proxy.protocol === "https:" ? 443 : 80);
+  const username = decodeURIComponent(proxy.username);
+  const password = decodeURIComponent(proxy.password);
+
+  const listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const bridgePort = (listener.addr as Deno.NetAddr).port;
+
+  let closed = false;
+  const conns: Deno.Conn[] = [];
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      listener.close();
+    } catch {
+      // Already closed after the one-shot accept.
+    }
+    for (const conn of conns) {
+      try {
+        conn.close();
+      } catch {
+        // Already closed by the peer or the pump.
+      }
+    }
+  };
+
+  (async () => {
+    // One-shot: the first (in-process) dial wins and the listener closes, so
+    // nothing else on the host can reach the bridge afterwards.
+    const local = await listener.accept();
+    listener.close();
+    conns.push(local);
+
+    // The whole tunnel establishment races one deadline, matching the ws
+    // handshakeTimeout so a dead proxy fails the attempt instead of wedging it.
+    const deadline = setTimeout(cleanup, PROXY_TUNNEL_TIMEOUT_MS);
+    try {
+      let upstream: Deno.Conn = await Deno.connect({
+        hostname: proxy.hostname,
+        port: proxyPort,
+      });
+      conns.push(upstream);
+      if (proxy.protocol === "https:") {
+        // TLS to the proxy itself, then (below) TLS-in-TLS to the gateway.
+        upstream = await Deno.startTls(upstream as Deno.TcpConn, {
+          hostname: proxy.hostname,
+        });
+        conns.push(upstream);
+      }
+
+      const authHeader = username || password
+        ? `Proxy-Authorization: Basic ${
+          Buffer.from(`${username}:${password}`).toString("base64")
+        }\r\n`
+        : "";
+      const connectTarget = `${gateway.hostname}:${gatewayPort}`;
+      await writeAll(
+        upstream,
+        new TextEncoder().encode(
+          `CONNECT ${connectTarget} HTTP/1.1\r\nHost: ${connectTarget}\r\n${authHeader}\r\n`,
+        ),
+      );
+
+      let head = new Uint8Array(0);
+      const chunk = new Uint8Array(4096);
+      let leftover = new Uint8Array(0);
+      while (true) {
+        const n = await upstream.read(chunk);
+        if (n === null) throw new Error("proxy closed during CONNECT");
+        const merged = new Uint8Array(head.length + n);
+        merged.set(head);
+        merged.set(chunk.subarray(0, n), head.length);
+        head = merged;
+        if (head.length > PROXY_CONNECT_HEADER_MAX_BYTES) {
+          throw new Error("proxy CONNECT response header too large");
+        }
+        const text = new TextDecoder("latin1").decode(head);
+        const end = text.indexOf("\r\n\r\n");
+        if (end === -1) continue;
+        const statusLine = text.slice(0, text.indexOf("\r\n"));
+        if (!/^HTTP\/1\.[01] 200/.test(statusLine)) {
+          throw new Error(`proxy refused CONNECT: ${statusLine}`);
+        }
+        leftover = head.subarray(end + 4);
+        break;
+      }
+
+      let stream: Deno.Conn = upstream;
+      if (secure) {
+        // For an https proxy this is TLS-in-TLS; Deno types startTls for
+        // TcpConn only, and the runtime may refuse — in which case the error
+        // lands in the log below rather than a silent retry loop. Plain http
+        // CONNECT proxies (the standard corporate shape) take this path over
+        // a TcpConn and are fully supported.
+        stream = await Deno.startTls(upstream as Deno.TcpConn, {
+          hostname: gateway.hostname,
+        });
+        conns.push(stream);
+      }
+      clearTimeout(deadline);
+
+      const pumpUp = local.readable.pipeTo(stream.writable).catch(() => {});
+      const pumpDown = (async () => {
+        // CONNECT responses cannot carry tunneled bytes before we speak TLS,
+        // but a pipelining proxy is cheap to honor.
+        if (leftover.length > 0 && !secure) await writeAll(local, leftover);
+        await stream.readable.pipeTo(local.writable).catch(() => {});
+      })();
+      await Promise.all([pumpUp, pumpDown]);
+    } catch (error) {
+      console.error("[TunnelAgent] proxy tunnel failed", error);
+    } finally {
+      clearTimeout(deadline);
+      cleanup();
+    }
+  })().catch((error) => {
+    // accept() rejecting means cleanup() closed the listener first — routine
+    // teardown, not a failure worth logging.
+    if (!closed) console.error("[TunnelAgent] proxy bridge failed", error);
+  });
+
+  return {
+    url: `ws://127.0.0.1:${bridgePort}${gateway.pathname}${gateway.search}`,
+    hostHeader,
+    cleanup,
+  };
+}
+
+async function writeAll(conn: Deno.Conn, bytes: Uint8Array): Promise<void> {
+  let written = 0;
+  while (written < bytes.length) {
+    written += await conn.write(bytes.subarray(written));
   }
-  return new HttpsProxyAgent(url.toString());
 }
 
 function controlFetch(input: URL, init: RequestInit): Promise<Response> {
@@ -736,16 +886,20 @@ interface SessionHandle {
 
 function startSession(state: AgentState, token: TokenResponse): SessionHandle {
   const activeRequests = new Map<string, AbortController>();
-  const proxyAgent = proxyUrl ? createWsProxyAgent(proxyUrl) : undefined;
+  const gatewayUrl = token.gatewayUrl || state.gatewayUrl;
+  const bridge = proxyUrl ? startProxyBridge(proxyUrl, gatewayUrl) : null;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token.accessToken}`,
+    "x-twofiftytwo-agent-version": AGENT_VERSION,
+  };
+  // The upgrade travels to the loopback bridge, but the gateway routes on the
+  // authority it terminates for — carry it explicitly.
+  if (bridge) headers.Host = bridge.hostHeader;
   const socket = new WebSocket(
-    token.gatewayUrl || state.gatewayUrl,
+    bridge ? bridge.url : gatewayUrl,
     TUNNEL_PROTOCOL,
     {
-      headers: {
-        Authorization: `Bearer ${token.accessToken}`,
-        "x-twofiftytwo-agent-version": AGENT_VERSION,
-      },
-      agent: proxyAgent,
+      headers,
       maxPayload: MAX_WS_MESSAGE_BYTES,
       perMessageDeflate: false,
       handshakeTimeout: 15_000,
@@ -861,6 +1015,7 @@ function startSession(state: AgentState, token: TokenResponse): SessionHandle {
   socket.on("close", (code: number) => {
     clearInterval(heartbeat);
     clearTimeout(refreshTimer);
+    bridge?.cleanup();
     shutdown.signal.removeEventListener("abort", abort);
     for (const controller of activeRequests.values()) controller.abort();
     activeRequests.clear();

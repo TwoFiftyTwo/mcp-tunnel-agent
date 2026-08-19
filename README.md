@@ -92,29 +92,23 @@ Runs as a single static binary under systemd. (Docker also works — see
    `sha256sum` must print `mcp-tunnel-agent-linux-x64.tar.gz: OK`; the `&&`
    chain makes sure nothing is extracted or installed if it does not.
 
-2. Create a dedicated user and a root-only settings file:
+2. Configure and start it as a systemd service. This runs as one fail-fast root
+   shell, so a failing step stops instead of leaving a half-configured service:
 
    ```bash
-   sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin tfmcp
-   sudo install -d -m 700 -o tfmcp -g tfmcp /var/lib/twofiftytwo-mcp-tunnel
-   sudo install -d -m 700 /etc/twofiftytwo-mcp-tunnel
-   sudo tee /etc/twofiftytwo-mcp-tunnel/env >/dev/null <<'EOF'
+   sudo bash -euo pipefail <<'SETUP'
+   id -u tfmcp >/dev/null 2>&1 ||
+     useradd --system --home /nonexistent --shell /usr/sbin/nologin tfmcp
+   install -d -m 700 -o tfmcp -g tfmcp /var/lib/twofiftytwo-mcp-tunnel
+   install -d -m 700 /etc/twofiftytwo-mcp-tunnel
+   cat >/etc/twofiftytwo-mcp-tunnel/env <<'ENV'
    MCP_TUNNEL_CONTROL_URL=https://<your-twofiftytwo-api-host>
    MCP_TUNNEL_ENROLLMENT_TOKEN=<one-time token>
    MCP_LOCAL_URL=http://localhost:8010/mcp
    MCP_TUNNEL_STATE_FILE=/var/lib/twofiftytwo-mcp-tunnel/state.json
-   EOF
-   sudo chmod 600 /etc/twofiftytwo-mcp-tunnel/env
-   ```
-
-   Add `MCP_LOCAL_AUTH_TYPE=bearer` and `MCP_LOCAL_AUTH_TOKEN=...` if your MCP
-   server needs a credential; `MCP_TUNNEL_HTTPS_PROXY=...` behind a proxy. See
-   [Configuration reference](#configuration-reference).
-
-3. Create the service and start it:
-
-   ```bash
-   sudo tee /etc/systemd/system/twofiftytwo-mcp-tunnel.service >/dev/null <<'EOF'
+   ENV
+   chmod 600 /etc/twofiftytwo-mcp-tunnel/env
+   cat >/etc/systemd/system/twofiftytwo-mcp-tunnel.service <<'UNIT'
    [Unit]
    Description=TwoFiftyTwo MCP tunnel agent
    After=network-online.target
@@ -135,17 +129,30 @@ Runs as a single static binary under systemd. (Docker also works — see
 
    [Install]
    WantedBy=multi-user.target
-   EOF
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now twofiftytwo-mcp-tunnel
+   UNIT
+   systemctl daemon-reload
+   systemctl enable twofiftytwo-mcp-tunnel
+   systemctl restart twofiftytwo-mcp-tunnel
+   SETUP
    ```
 
-4. Confirm it enrolled: `journalctl -u twofiftytwo-mcp-tunnel -n 20` should show
+   Add `MCP_LOCAL_AUTH_TYPE=bearer` and `MCP_LOCAL_AUTH_TOKEN=...` to the env
+   heredoc if your MCP server needs a credential; `MCP_TUNNEL_HTTPS_PROXY=...`
+   behind a proxy. See [Configuration reference](#configuration-reference).
+   `systemctl restart` is there on purpose: `enable --now` does not restart an
+   already-running service, so a re-run with a new token would keep the old one.
+
+   **Running more than one tunnel on the same host:** give each its own unit
+   name, env file and state directory (the in-app setup page emits names
+   carrying the server id automatically). Two tunnels sharing a state file would
+   have the second adopt the first's identity.
+
+3. Confirm it enrolled: `journalctl -u twofiftytwo-mcp-tunnel -n 20` should show
    a successful enrollment and connection. After that you may delete the
    `MCP_TUNNEL_ENROLLMENT_TOKEN=` line from the settings file (optional — a used
    token is never replayed; leaving it only lets the agent re-enroll by itself
    if the credential is ever replaced).
-5. Continue with [After it is running](#after-it-is-running).
+4. Continue with [After it is running](#after-it-is-running).
 
 ## macOS — step by step
 

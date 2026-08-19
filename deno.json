@@ -1,7 +1,6 @@
 {
   "imports": {
     "@std/encoding/base64": "jsr:@std/encoding@^1.0.10/base64",
-    "https-proxy-agent": "npm:https-proxy-agent@^7.0.6",
     "ws": "npm:ws@^8.18.3"
   },
   "tasks": {

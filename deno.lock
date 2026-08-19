@@ -2,7 +2,7 @@
   "version": "5",
   "specifiers": {
     "jsr:@std/encoding@^1.0.10": "1.0.11",
-    "npm:https-proxy-agent@^7.0.6": "7.0.6",
+    "npm:@types/node@*": "24.2.0",
     "npm:ws@^8.18.3": "8.21.1"
   },
   "jsr": {
@@ -11,24 +11,14 @@
     }
   },
   "npm": {
-    "agent-base@7.1.4": {
-      "integrity": "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="
-    },
-    "debug@4.4.3": {
-      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+    "@types/node@24.2.0": {
+      "integrity": "sha512-3xyG3pMCq3oYCNg7/ZP+E1ooTaGB4cG8JWRsqqOYQdbWNY4zbaV0Ennrd7stjiJEFZCaybcIgpTjJWHRfBSIDw==",
       "dependencies": [
-        "ms"
+        "undici-types"
       ]
     },
-    "https-proxy-agent@7.0.6": {
-      "integrity": "sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw==",
-      "dependencies": [
-        "agent-base",
-        "debug"
-      ]
-    },
-    "ms@2.1.3": {
-      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="
+    "undici-types@7.10.0": {
+      "integrity": "sha512-t5Fy/nfn+14LuOc2KNYg75vZqClpAiqscVvMygNnlsHBFpSXdJaYtXMcdNLpl/Qvc3P2cB3s6lOV51nqsFq4ag=="
     },
     "ws@8.21.1": {
       "integrity": "sha512-+0NTnW77fFN/DjQi6k/Sq/Yvk4Sgajw7urW8V+asjXnRgDs9gyGkdb7EzgfhA4goXsRIZKE28fzIXBHEzhuiWw=="
@@ -37,7 +27,6 @@
   "workspace": {
     "dependencies": [
       "jsr:@std/encoding@^1.0.10",
-      "npm:https-proxy-agent@^7.0.6",
       "npm:ws@^8.18.3"
     ]
   }
