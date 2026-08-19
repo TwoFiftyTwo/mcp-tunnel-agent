@@ -1,0 +1,52 @@
+<!--
+  WinSW service definition for the TwoFiftyTwo MCP tunnel agent.
+
+  Installed by install.ps1, which fills the __PLACEHOLDER__ values from its
+  parameters. Do not hand-edit the token in here after first start: install.ps1
+  removes MCP_TUNNEL_ENROLLMENT_TOKEN once the agent has enrolled, so the only
+  long-lived secret on disk is the ACL-protected state file — every Windows
+  per-service env mechanism stores its values cleartext to local admins.
+
+  WinSW stops the agent by sending Ctrl+C (arrives as SIGINT), which is the one
+  path that gives a Deno process a graceful shutdown on Windows: `sc stop`
+  alone delivers no signal to a console-less service.
+-->
+<service>
+  <id>twofiftytwo-mcp-tunnel</id>
+  <name>TwoFiftyTwo MCP Tunnel</name>
+  <description>Outbound-only tunnel connecting a private MCP server to TwoFiftyTwo. No inbound ports.</description>
+
+  <executable>%BASE%\mcp-tunnel-agent.exe</executable>
+  <workingdirectory>%BASE%</workingdirectory>
+
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+
+  <!-- Restart on crash: quickly at first, then back off; counter resets after an hour up. -->
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <onfailure action="restart" delay="60 sec" />
+  <resetfailure>1 hour</resetfailure>
+
+  <!-- Ctrl+C then wait; the agent closes its socket cleanly (code 1000). -->
+  <stoptimeout>20 sec</stoptimeout>
+
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+  <logpath>%BASE%\logs</logpath>
+
+  <env name="MCP_TUNNEL_CONTROL_URL" value="__CONTROL_URL__" />
+  <env name="MCP_TUNNEL_ENROLLMENT_TOKEN" value="__ENROLLMENT_TOKEN__" />
+  <env name="MCP_LOCAL_URL" value="__MCP_LOCAL_URL__" />
+  <env name="MCP_TUNNEL_STATE_FILE" value="__STATE_FILE__" />
+  <!--
+    Trust the Windows certificate store, not only Deno's bundled Mozilla roots.
+    Without this, any TLS-inspecting proxy (Zscaler, Netskope, Palo Alto) breaks
+    both the control-plane call and the WSS handshake with a bare
+    "connection attempt failed".
+  -->
+  <env name="DENO_TLS_CA_STORE" value="system" />
+  __EXTRA_ENV__
+</service>
