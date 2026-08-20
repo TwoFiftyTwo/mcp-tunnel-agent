@@ -11,6 +11,10 @@
   Idempotent enough to re-run for a credential replacement: pass a fresh
   -EnrollmentToken and it re-enrolls the existing install.
 
+  Re-running over a HEALTHY install (an upgrade) also works: the agent keeps
+  its stored enrollment, the spent token in the command is ignored, and the
+  script reports the upgrade as success when the tunnel reconnects.
+
 .PARAMETER ControlUrl
   Your TwoFiftyTwo API origin, e.g. https://api.twofiftytwo.ai (shown in the
   Data Sources wizard). Must be https.
@@ -101,8 +105,32 @@ if ($existing -and $existing.Status -ne 'Stopped') {
   Invoke-Native "stopping the existing service" { & "$InstallDir\$ServiceId.exe" stop } | Out-Null
 }
 
-Copy-Item (Join-Path $here 'mcp-tunnel-agent.exe') $InstallDir -Force
-Copy-Item (Join-Path $here "$ServiceId.exe")       $InstallDir -Force
+# Stopping the service returns when the WRAPPER process exits, but the agent
+# child can take several more seconds to finish its graceful shutdown, and
+# Windows keeps an executable's image file locked until its process is fully
+# gone. An immediate copy then dies on a sharing violation and aborts the
+# install with the service left stopped - which is exactly the documented
+# upgrade path ("re-run install.ps1"). Retry ONLY sharing/lock violations
+# (win32 0x20/0x21), bounded; any other failure - permissions, disk, a
+# vanished source - rethrows immediately with its original diagnostic.
+function Copy-ItemWithRetry([string] $Source, [string] $DestinationDir) {
+  $deadline = (Get-Date).AddSeconds(45)
+  while ($true) {
+    try { Copy-Item $Source $DestinationDir -Force; return }
+    catch [System.IO.IOException] {
+      $win32 = $_.Exception.HResult -band 0xFFFF
+      if ($win32 -ne 0x20 -and $win32 -ne 0x21) { throw }
+      if ((Get-Date) -ge $deadline) {
+        $leaf = Split-Path -Leaf $Source
+        throw "Could not replace ${leaf}: a process is still holding it after 45s. Check 'Get-Process mcp-tunnel-agent' and re-run this script."
+      }
+      Start-Sleep -Seconds 2
+    }
+  }
+}
+
+Copy-ItemWithRetry (Join-Path $here 'mcp-tunnel-agent.exe') $InstallDir
+Copy-ItemWithRetry (Join-Path $here "$ServiceId.exe")       $InstallDir
 
 # --- Render the service XML with this install's values ---
 $stateFile = Join-Path $StateDir 'state.json'
@@ -151,40 +179,87 @@ Invoke-Native "icacls (install dir, remove inheritance)" { & icacls $InstallDir 
 Invoke-Native "icacls (install dir, grant)" { & icacls $InstallDir /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "NT SERVICE\${ServiceId}:(OI)(CI)RX" } | Out-Null
 Invoke-Native "icacls (logs dir)" { & icacls "$InstallDir\logs" /grant "NT SERVICE\${ServiceId}:(OI)(CI)M" } | Out-Null
 
-# --- Start and wait for enrollment ---
-# On a re-run (Replace tunnel credential) state.json already exists, holding
-# the REVOKED credential. The agent starts with it, gets a 401, then re-enrolls
-# with the token and rewrites the file. Waiting for the file to merely exist
-# would pass immediately and strip the token before that happened, leaving the
-# service looping on 401. So: remember the pre-start write time and wait for a
-# NEWER one.
+# --- Start and wait for the tunnel to come up ---
+# Two distinct success signals, because two distinct things can happen:
+#
+#  1. ENROLLED - state.json gets a NEWER write time than before the start.
+#     First install, and credential replacement: state holds the REVOKED
+#     credential, the agent gets a 401, re-enrolls with the token and rewrites
+#     the file. Waiting for the file to merely exist would pass immediately
+#     and strip the token before that happened, so it must be a newer write.
+#
+#  2. CONNECTED - an upgrade re-run over a HEALTHY install. The agent starts,
+#     prefers its stored credential, connects, and never rewrites state.json -
+#     signal 1 cannot fire, and this used to time out and report failure while
+#     the service was up. The agent prints "[TunnelAgent] connected" to stdout,
+#     which the wrapper captures in logs\<service>.out.log; content appended
+#     to that log AFTER this start counts. A dead token or revoked credential
+#     never logs "connected" (the agent loops on errors instead), so this
+#     cannot mask the failure case signal 1 guards against.
 $priorWrite = if (Test-Path $stateFile) { (Get-Item $stateFile).LastWriteTimeUtc } else { [datetime]::MinValue }
+$agentOutLog = "$InstallDir\logs\$ServiceId.out.log"
+$priorLogLen = if (Test-Path $agentOutLog) { (Get-Item $agentOutLog).Length } else { 0 }
+
+# The wrapper holds the log open for writing, so read shared; a roll-by-size
+# rotation can shrink the file, in which case read it from the top. A read
+# failure only mutes signal 2 (signal 1 still decides), but remember it so the
+# timeout warning can say the check was blind instead of blaming the token.
+$script:agentLogReadFailed = $false
+function Read-AppendedLogText([string] $Path, [long] $From) {
+  if (-not (Test-Path $Path)) { return '' }
+  try {
+    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+      [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+      $fs.Position = if ($From -le $fs.Length) { $From } else { 0 }
+      return (New-Object System.IO.StreamReader($fs)).ReadToEnd()
+    } finally { $fs.Dispose() }
+  } catch { $script:agentLogReadFailed = $true; return '' }
+}
+
 Write-Host "Starting $ServiceId"
 Invoke-Native "starting the service" { & "$InstallDir\$ServiceId.exe" start } | Out-Null
 
 $deadline = (Get-Date).AddSeconds(60)
 $enrolled = $false
+$connected = $false
 while ((Get-Date) -lt $deadline) {
   if ((Test-Path $stateFile) -and ((Get-Item $stateFile).LastWriteTimeUtc -gt $priorWrite)) { $enrolled = $true; break }
+  # The LAST event must be a connect: a gateway can admit the socket and then
+  # immediately close it (capacity, supersede hold-down), in which case a
+  # disconnect line follows and this keeps waiting instead of declaring
+  # success on a tunnel that is actually flapping.
+  $tail = Read-AppendedLogText $agentOutLog $priorLogLen
+  if ($tail.LastIndexOf('[TunnelAgent] connected') -gt $tail.LastIndexOf('[TunnelAgent] disconnected')) { $connected = $true; break }
   Start-Sleep -Seconds 2
 }
 
-if (-not $enrolled) {
+if (-not $enrolled -and -not $connected) {
   Write-Warning "The service started but has not enrolled after 60s. Check $InstallDir\logs\$ServiceId.err.log"
   Write-Warning "Common causes: token already used or expired (generate a new one in Data Sources), no outbound 443 to $ControlUrl, or a TLS-inspecting proxy."
+  if ($script:agentLogReadFailed) {
+    Write-Warning "Note: $agentOutLog could not be read, so an existing-enrollment reconnect (upgrade) could not be detected either."
+  }
   exit 1
 }
 
-# --- Enrolled: drop the one-time token from the service config so no long-lived
-#     secret sits in the XML. The agent prefers its stored credential and never
-#     replays a spent token, so this is purely hygiene. Restart to apply.
+# --- Up: drop the one-time token from the service config so no long-lived
+#     secret sits in the XML - on an upgrade the token in the command was spent
+#     anyway. The agent prefers its stored credential and never replays a spent
+#     token, so this is purely hygiene. Restart to apply.
 $xml = Get-Content "$InstallDir\$ServiceId.xml" -Raw
 $xml = [regex]::Replace($xml, '\s*<env name="MCP_TUNNEL_ENROLLMENT_TOKEN"[^>]*/>', '')
 Set-Content -Path "$InstallDir\$ServiceId.xml" -Value $xml -Encoding UTF8
 Invoke-Native "restarting the service" { & "$InstallDir\$ServiceId.exe" restart } | Out-Null
 
 Write-Host ''
-Write-Host "Enrolled. The tunnel is running as service '$ServiceId' and will start with Windows." -ForegroundColor Green
+if ($enrolled) {
+  Write-Host "Enrolled. The tunnel is running as service '$ServiceId' and will start with Windows." -ForegroundColor Green
+} else {
+  Write-Host "Upgraded. The tunnel kept its existing enrollment and is running as service '$ServiceId'." -ForegroundColor Green
+}
 Write-Host "  Status : Get-Service $ServiceId"
 Write-Host "  Logs   : $InstallDir\logs\"
-Write-Host "  Next   : in TwoFiftyTwo, Data Sources -> your server -> Refresh tools, then an administrator approves it."
+if ($enrolled) {
+  Write-Host "  Next   : in TwoFiftyTwo, Data Sources -> your server -> Refresh tools, then an administrator approves it."
+}

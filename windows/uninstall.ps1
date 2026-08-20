@@ -35,7 +35,23 @@ if (Get-Service -Name $ServiceId -ErrorAction SilentlyContinue) {
 }
 
 if (Test-Path $InstallDir) {
-  Remove-Item -Recurse -Force $InstallDir
+  # The stop above returns when the wrapper exits, but the agent child can
+  # hold its executable's image lock for a few more seconds while it finishes
+  # shutting down - deleting immediately then fails on a sharing violation.
+  # Retry ONLY sharing/lock violations (win32 0x20/0x21), bounded; any other
+  # failure rethrows immediately with its original diagnostic.
+  $deadline = (Get-Date).AddSeconds(45)
+  while ($true) {
+    try { Remove-Item -Recurse -Force $InstallDir; break }
+    catch [System.IO.IOException] {
+      $win32 = $_.Exception.HResult -band 0xFFFF
+      if ($win32 -ne 0x20 -and $win32 -ne 0x21) { throw }
+      if ((Get-Date) -ge $deadline) {
+        throw "Could not remove ${InstallDir}: a process is still holding a file after 45s. Check 'Get-Process mcp-tunnel-agent' and re-run this script."
+      }
+      Start-Sleep -Seconds 2
+    }
+  }
   Write-Host "Removed $InstallDir"
 }
 
