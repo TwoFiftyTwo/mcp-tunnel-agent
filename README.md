@@ -162,30 +162,27 @@ with the same environment variables as the Linux steps.)
 
 1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and
    make sure it is running.
-2. Build the image from the source of the latest release:
-
-   ```bash
-   git clone --depth 1 https://github.com/TwoFiftyTwo/mcp-tunnel-agent.git
-   cd mcp-tunnel-agent
-   docker build -t twofiftytwo-mcp-tunnel-agent:local .
-   ```
-
-3. Run the command from the wizard's **Docker** tab. It looks like:
+2. Run the command from the wizard's **Docker** tab. It pulls the published
+   multi-arch image `ghcr.io/twofiftytwo/mcp-tunnel-agent:1` (amd64/arm64,
+   signed) — to check the signature first, see
+   [Verify the image](#verify-the-image); to build it yourself instead, see
+   [Building from source](#building-from-source). The command looks like:
 
    <!-- ENV CONTRACT: the variable names below are duplicated in the agent's
         env-parsing block (src/main.ts) and the Data Sources setup wizard
-        (frontend .../TunnelEnrollmentPanel.tsx, buildTunnelDockerCommand).
+        (frontend .../tunnel-commands.ts, dockerRunCommand).
         Change one, change all three. -->
 
    ```bash
    docker run -d \
+     --pull=always \
      --restart=unless-stopped \
      -v twofiftytwo-mcp-state-<server-id>:/data \
      -e MCP_TUNNEL_CONTROL_URL=https://<your-twofiftytwo-api-host> \
      -e MCP_TUNNEL_ENROLLMENT_TOKEN='<one-time token>' \
      -e MCP_LOCAL_URL=http://host.docker.internal:8010/mcp \
      --name twofiftytwo-mcp-tunnel-<server-id> \
-     twofiftytwo-mcp-tunnel-agent:local
+     ghcr.io/twofiftytwo/mcp-tunnel-agent:1
    ```
 
    `host.docker.internal` is how a container reaches a server running on the Mac
@@ -194,10 +191,10 @@ with the same environment variables as the Linux steps.)
    command for that name to resolve.) Add
    `-e MCP_LOCAL_AUTH_TYPE=bearer -e MCP_LOCAL_AUTH_TOKEN=...` if it needs a
    credential.
-4. Confirm it enrolled: `docker logs twofiftytwo-mcp-tunnel-<server-id>`. The
+3. Confirm it enrolled: `docker logs twofiftytwo-mcp-tunnel-<server-id>`. The
    container restarts with Docker; the credential lives in the named volume, so
    later restarts need no token.
-5. Continue with [After it is running](#after-it-is-running).
+4. Continue with [After it is running](#after-it-is-running).
 
 ## After it is running
 
@@ -309,18 +306,55 @@ re-enrolls an existing install (after **Replace tunnel credential**).
 The tunnel never updates itself — on Windows the service account cannot even
 write to its own install directory, by design. To be told about new versions,
 **watch the releases** of https://github.com/TwoFiftyTwo/mcp-tunnel-agent (Watch
-→ Custom → Releases). Then:
+→ Custom → Releases); the Data Sources page also shows **Update available** next
+to a connected tunnel's version. Then:
 
 - **Windows:** download the new package and re-run `install.ps1` with the same
   arguments; it stops the service, replaces the binaries, and restarts. The
   credential is kept, so no new enrollment token is needed.
 - **Linux:** repeat step 1 of the Linux section (download, verify, install),
   then `sudo systemctl restart twofiftytwo-mcp-tunnel`.
-- **Docker:** `git pull`, rebuild the image, and recreate the container on the
-  same state volume.
+- **Docker:** `docker rm -f twofiftytwo-mcp-tunnel-<server-id>`, then re-run the
+  wizard's run command — `--pull=always` fetches the newest release, and the
+  credential lives in the state volume, so no new token is needed.
 
 Releases stay wire-compatible with older tunnels; a release note will say so
 explicitly if one ever is not.
+
+## Verify the image
+
+Every published image is built by our release workflow and signed with
+[cosign](https://docs.sigstore.dev/) (keyless). The signature anchors to the
+workflow's OIDC identity, witnessed in a public transparency log (Rekor) — there
+is no key we distribute, and none we could leak.
+
+With cosign (v2+):
+
+```bash
+cosign verify ghcr.io/twofiftytwo/mcp-tunnel-agent:1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp \
+  '^https://github.com/TwoFiftyTwo/twofiftytwo/\.github/workflows/mcp-tunnel-agent-release\.yml@refs/tags/mcp-tunnel-agent-v.*$'
+```
+
+The certificate identity names `TwoFiftyTwo/twofiftytwo` — the private monorepo
+where the release workflow runs. This repository carries the exported source of
+exactly what that workflow builds, refreshed on every release. To pin harder
+than the tag, run the container by the digest the verify command prints
+(`ghcr.io/twofiftytwo/mcp-tunnel-agent@sha256:…`).
+
+## Building from source
+
+The image can always be built from this repository instead of pulled:
+
+```bash
+git clone --depth 1 https://github.com/TwoFiftyTwo/mcp-tunnel-agent.git
+cd mcp-tunnel-agent
+docker build -t twofiftytwo-mcp-tunnel-agent:local .
+```
+
+Then use `twofiftytwo-mcp-tunnel-agent:local` in place of the published image in
+the run command, and drop `--pull=always`.
 
 ## Troubleshooting
 
@@ -346,3 +380,9 @@ explicitly if one ever is not.
   configured HTTPS CONNECT proxy;
 - access from the agent process/container to the private MCP endpoint;
 - no inbound internet access, no VPN, no public endpoint.
+
+## License
+
+[Apache-2.0](LICENSE). The bundled Windows service wrapper (WinSW) is
+redistributed under its own MIT license (`LICENSE-WinSW.txt` in the Windows
+package).

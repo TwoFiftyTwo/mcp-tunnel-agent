@@ -34,7 +34,7 @@ const LOCAL_REQUEST_TIMEOUT_MS = 70_000;
 const HEALTHY_SESSION_MS = 60_000;
 const TUNNEL_PROTOCOL = "twofiftytwo-mcp-tunnel.v1";
 /** Reported to the gateway on connect and surfaced in the Data Sources UI. */
-const AGENT_VERSION = "1.2.2";
+const AGENT_VERSION = "1.3.0";
 /**
  * Gateway close codes the agent treats specially. (4003 = token expired is
  * deliberately NOT special-cased: the ordinary reconnect path fetches a fresh
