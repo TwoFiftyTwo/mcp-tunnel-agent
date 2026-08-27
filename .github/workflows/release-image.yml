@@ -146,3 +146,20 @@ jobs:
             exit 0
           fi
           docker buildx imagetools create -t "${IMAGE}:${MAJOR}" "${IMAGE}@${DIGEST}"
+
+      # Signatures and attestations attach to the DIGEST, and imagetools
+      # create points the major tag at that same digest — but customers run
+      # the tag-level commands, so prove those exact commands on every
+      # release rather than reasoning it out. (If promotion was skipped, the
+      # tag points at a newer, equally signed release and still verifies.)
+      - name: Verify the promoted tag
+        env:
+          MAJOR: ${{ steps.tags.outputs.major }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cosign verify "${IMAGE}:${MAJOR}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/\.github/workflows/release-image\.yml@refs/tags/v.*$" \
+            -o text
+          gh attestation verify "oci://${IMAGE}:${MAJOR}" --owner TwoFiftyTwo --bundle-from-oci
