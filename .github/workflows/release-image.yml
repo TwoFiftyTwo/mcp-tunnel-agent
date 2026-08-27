@@ -124,7 +124,7 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/\.github/workflows/release-image\.yml@refs/tags/v.*$" \
             -o text
-          gh attestation verify "oci://${IMAGE}@${DIGEST}" --owner TwoFiftyTwo --bundle-from-oci
+          gh attestation verify "oci://${IMAGE}@${DIGEST}" --repo "${{ github.repository }}" --bundle-from-oci
 
       # The customer-facing major tag moves only now — after signing and the
       # verify step — and never backwards: a re-release of an old tag must
@@ -162,4 +162,4 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp "^https://github.com/${{ github.repository }}/\.github/workflows/release-image\.yml@refs/tags/v.*$" \
             -o text
-          gh attestation verify "oci://${IMAGE}:${MAJOR}" --owner TwoFiftyTwo --bundle-from-oci
+          gh attestation verify "oci://${IMAGE}:${MAJOR}" --repo "${{ github.repository }}" --bundle-from-oci
