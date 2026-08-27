@@ -1,9 +1,16 @@
 # TwoFiftyTwo MCP tunnel agent
 
-A small program you run on a machine inside your network. It connects your
-private MCP server to TwoFiftyTwo through an **outbound-only** encrypted
-connection, so TwoFiftyTwo's analyst can use your MCP tools without any inbound
-firewall rule, VPN, or public endpoint on your side.
+If your MCP server is private, on-premises, or behind a firewall, run the tunnel
+agent — a small program on a machine inside your network — to connect it to
+TwoFiftyTwo without exposing the server to the public internet.
+
+- **Outbound only:** the agent makes one encrypted connection (WSS over 443) out
+  to TwoFiftyTwo. No inbound firewall rule, VPN, or public endpoint.
+- **Reaches exactly one URL:** requests can only travel to the MCP server URL
+  you configure — nothing else on your network is addressable through the
+  tunnel.
+- **Your credentials stay with you:** the MCP URL and any credential your MCP
+  server needs are used on your host and never sent to TwoFiftyTwo.
 
 Pick your platform and follow the steps. Everything else in this document is
 reference material you can come back to.
@@ -30,13 +37,12 @@ You need three things:
 1. **Your MCP server's URL**, as reachable from the machine that will run the
    tunnel — for example `http://localhost:8010/mcp`. It must speak MCP
    Streamable HTTP. If it needs a token or API key, have that ready too.
-2. **A one-time enrollment token** from TwoFiftyTwo. A TwoFiftyTwo administrator
-   opens **Data Sources → Custom MCP servers → Add server**, names the server,
-   and the setup wizard shows the token together with the exact command for your
-   platform. The token can be used once and expires. If it lapses before the
-   agent enrolled, the server's setup card offers **Generate enrollment token**;
-   once an agent is enrolled, **⋯ → Replace tunnel credential** issues a new one
-   instead.
+2. **A one-time enrollment token** from TwoFiftyTwo. In the app, open **Data
+   Sources → Custom MCP servers → Add server** and name the server. The setup
+   wizard shows the token together with the exact command for your platform. The
+   token can be used once and expires. If it expires before the agent enrolls,
+   use **Generate enrollment token** on the setup page; once an agent is
+   enrolled, **⋯ → Replace tunnel credential** issues a new one instead.
 3. **Outbound HTTPS (TCP 443)** from that machine to your TwoFiftyTwo API host,
    directly or through your corporate proxy. Nothing inbound.
 
