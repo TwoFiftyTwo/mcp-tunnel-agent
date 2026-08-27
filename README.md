@@ -164,7 +164,7 @@ with the same environment variables as the Linux steps.)
    make sure it is running.
 2. Run the command from the wizard's **Docker** tab. It pulls the published
    multi-arch image `ghcr.io/twofiftytwo/mcp-tunnel-agent:1` (amd64/arm64,
-   signed) — to check the signature first, see
+   signed) — to check the signature and provenance first, see
    [Verify the image](#verify-the-image); to build it yourself instead, see
    [Building from source](#building-from-source). The command looks like:
 
@@ -323,10 +323,13 @@ explicitly if one ever is not.
 
 ## Verify the image
 
-Every published image is built by our release workflow and signed with
-[cosign](https://docs.sigstore.dev/) (keyless). The signature anchors to the
-workflow's OIDC identity, witnessed in a public transparency log (Rekor) — there
-is no key we distribute, and none we could leak.
+Every published image is built **in this repository** — by
+[`release-image.yml`](.github/workflows/release-image.yml), from the source you
+can read here, on the version tag — then signed with
+[cosign](https://docs.sigstore.dev/) (keyless) and attested with SLSA build
+provenance. Both anchor to that workflow's OIDC identity, witnessed in a public
+transparency log (Rekor) — there is no key we distribute, and none we could
+leak.
 
 With cosign (v2+):
 
@@ -334,14 +337,18 @@ With cosign (v2+):
 cosign verify ghcr.io/twofiftytwo/mcp-tunnel-agent:1 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp \
-  '^https://github.com/TwoFiftyTwo/twofiftytwo/\.github/workflows/mcp-tunnel-agent-release\.yml@refs/tags/mcp-tunnel-agent-v.*$'
+  '^https://github.com/TwoFiftyTwo/mcp-tunnel-agent/\.github/workflows/release-image\.yml@refs/tags/v.*$'
 ```
 
-The certificate identity names `TwoFiftyTwo/twofiftytwo` — the private monorepo
-where the release workflow runs. This repository carries the exported source of
-exactly what that workflow builds, refreshed on every release. To pin harder
-than the tag, run the container by the digest the verify command prints
-(`ghcr.io/twofiftytwo/mcp-tunnel-agent@sha256:…`).
+With the GitHub CLI (any signed-in account; `--repo` pins the provenance to this
+repository, not merely the organization):
+
+```bash
+gh attestation verify oci://ghcr.io/twofiftytwo/mcp-tunnel-agent:1 --repo TwoFiftyTwo/mcp-tunnel-agent --bundle-from-oci
+```
+
+To pin harder than the tag, run the container by the digest the verify commands
+print (`ghcr.io/twofiftytwo/mcp-tunnel-agent@sha256:…`).
 
 ## Building from source
 
