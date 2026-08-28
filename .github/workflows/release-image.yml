@@ -85,6 +85,11 @@ jobs:
           push: true
           provenance: false
           sbom: false
+          # The release tag busts the Dockerfile's apt-get upgrade layer so
+          # base-OS security patches land in every published image instead of
+          # being served from a stale build cache.
+          build-args: |
+            APT_CACHE_BUST=${{ steps.tags.outputs.version }}
           tags: ${{ env.IMAGE }}:${{ steps.tags.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}

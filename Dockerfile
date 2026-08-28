@@ -1,5 +1,12 @@
 FROM denoland/deno:debian-2.7.8
 
+# Patch base-OS CVEs at build time (openssl et al.). APT_CACHE_BUST is passed
+# by the release workflow (the release tag) so this layer is rebuilt — and
+# patches picked up — on every published release rather than served from a
+# stale build cache.
+ARG APT_CACHE_BUST=1
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY deno.json deno.lock* ./

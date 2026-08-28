@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1
+
+- Security: the container image now upgrades base-OS packages at build time,
+  picking up the openssl 3.5.6 fixes for CVE-2026-31789 and CVE-2026-34182. No
+  agent code changes. Docker installs re-running the wizard's command pick this
+  up automatically (`:1` tag with `--pull=always`); binary and Windows installs
+  are unaffected (the agent does not link the patched packages).
+
 ## 1.3.0
 
 - Published as a multi-arch (amd64 + arm64) container image:
